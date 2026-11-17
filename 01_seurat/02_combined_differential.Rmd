@@ -1,0 +1,289 @@
+---
+title: "Combined Differential Analysis"
+author: "Jack Webb"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+## This markdown takes the pre-processed and labeled rna and atac objects, integrates them and performs differential analysis.
+
+```{r setup, include=FALSE}
+library(ggplot2)
+library(plotly)
+library(htmlwidgets)
+library(pheatmap)
+library(ggrepel)
+library(Signac)
+library(Seurat)
+library(patchwork)
+library(GenomicRanges)
+library(future)
+library(AnnotationHub)
+library(BSgenome.Ggallus.UCSC.galGal6)
+library(dplyr)
+library(GenomeInfoDb)
+```
+
+## Load rna and atac
+
+```{r}
+rna <- readRDS("rna_prePlot.rds")
+atac <- readRDS("atac_prePlot.rds")
+```
+
+## Transfer Anchors and Imputation
+
+```{r transfer-anchors}
+transfer.anchors <- FindTransferAnchors(
+  reference = rna, 
+  query = atac, 
+  features = VariableFeatures(object = rna),
+  reference.assay = "RNA", 
+  query.assay = "ACTIVITY", 
+  reduction = "cca"
+)
+
+genes.use <- VariableFeatures(rna)
+rna <- JoinLayers(rna)
+refdata <- GetAssayData(rna, assay = "RNA", slot = "data")[genes.use, ]
+
+imputation <- TransferData(
+  anchorset = transfer.anchors, 
+  refdata = refdata, 
+  weight.reduction = atac[["lsi"]],
+  dims = 2:30
+)
+atac[["RNA"]] <- imputation
+```
+
+## Merge and Run UMAP
+
+```{r merge-umap}
+combined <- merge(x = rna, y = atac)
+combined <- ScaleData(combined, features = genes.use, do.scale = FALSE)
+combined <- RunPCA(combined, features = genes.use, verbose = FALSE)
+combined <- RunUMAP(combined, dims = 1:30)
+
+saveRDS(combined, "combined.rds")
+```
+
+# Interactive UMAP Plots
+
+### UMAP by Modality
+
+```{r plot-modality}
+p_modality <- DimPlot(combined, reduction = "umap", group.by = "modality", label = TRUE) +
+  ggtitle("Integrated UMAP: RNA and ATAC Modalities")
+plotly_modality <- ggplotly(p_modality)
+htmlwidgets::saveWidget(plotly_modality, "Integrated_UMAP_Modality.html")
+
+plotly_modality
+```
+
+### UMAP by Predicted Cell Type
+
+```{r plot-celltype}
+p_celltype <- DimPlot(combined, reduction = "umap", group.by = "celltype", label = TRUE) +
+  ggtitle("Integrated UMAP: Predicted Cell Types")
+plotly_celltype <- ggplotly(p_celltype)
+htmlwidgets::saveWidget(plotly_celltype, "Integrated_UMAP_CellType.html")
+plotly_celltype
+```
+
+### UMAP by Sample
+
+```{r plot-sample}
+p_sample <- DimPlot(combined, reduction = "umap", group.by = "sample", label = TRUE) +
+  ggtitle("Integrated UMAP: Sample")
+plotly_sample <- ggplotly(p_sample)
+htmlwidgets::saveWidget(plotly_sample, "Integrated_UMAP_Sample.html")
+plotly_sample
+```
+
+## Differential Accessibility (ATAC)
+
+```{r subset-atac}
+atac_MG <- subset(atac, predicted.id %in% c("resting MG", "activated MG"))
+Idents(atac_MG) <- atac_MG$predicted.id
+DefaultAssay(atac_MG) <- 'ATAC'
+
+#This takes a very long time, already saved for easy use
+ da_peaks <- FindMarkers(
+   object = atac_MG,
+   ident.1 = "activated MG",
+   ident.2 = "resting MG",
+   test.use = "LR",
+)
+
+write.csv(da_peaks, file = "da_peaks.csv", row.names = TRUE)
+da_peaks <- read.csv("da_peaks.csv")
+head(da_peaks)
+```
+
+## Volcano Plot: Differential Accessible Peaks
+
+```{r volcano-peaks}
+da_peaks$log_pval <- -log10(da_peaks$p_val + 1e-10)
+da_peaks$Significant <- ifelse(da_peaks$p_val < 0.05 & abs(da_peaks$avg_log2FC) > 0.25, "Yes", "No")
+
+volcano_plot <- ggplot(da_peaks, aes(x = avg_log2FC, y = log_pval, color = Significant)) +
+  geom_point(alpha = 0.8) +
+  theme_minimal() +
+  labs(title = "Volcano Plot: Differential Accessible Peaks",
+       x = "Average Log2 Fold Change",
+       y = "-Log10 p-value") +
+  scale_color_manual(values = c("No" = "grey", "Yes" = "red"))
+
+print(volcano_plot)
+```
+
+## Differential Activity on Combined Object between activated MG cluster and resting MG cluster
+
+```{r diff-activity}
+Idents(combined) <- combined$celltype
+DefaultAssay(combined) <- 'ACTIVITY'
+da_activity <- FindMarkers(
+  object = combined,
+  ident.1 = "activated MG",
+  ident.2 = "resting MG",
+  test.use = "LR",
+)
+head(da_activity)
+write.csv(da_activity, file = "da_activity.csv", row.names = TRUE)
+```
+
+## Volcano Plot: Differential Activity between MG clusters, print top 10 up and down regulated genes by log2FC
+
+```{r volcano-activity}
+da_activity$log_pval <- -log10(da_activity$p_val + 1e-10)
+#remove inisgnificant
+da_activity$Significant <- ifelse(da_activity$p_val < 0.05 & abs(da_activity$avg_log2FC) > 0.25, "Yes", "No")
+
+top_up   <- head(rownames(da_activity[order(-da_activity$avg_log2FC), ]), 10)
+top_down <- head(rownames(da_activity[order( da_activity$avg_log2FC), ]), 10)
+top_genes <- c(top_up, top_down)
+
+table(top_up)
+table(top_down)
+
+da_activity$label <- ifelse(rownames(da_activity) %in% top_genes, rownames(da_activity), NA)
+
+volcano_plot <- ggplot(da_activity, aes(x = avg_log2FC, y = log_pval)) +
+  geom_point(aes(color = Significant), alpha = 0.8) +
+  theme_minimal() +
+  labs(title = "Volcano Plot: Differential Activity (activated vs resting MG)",
+       x     = "Average Log2 Fold Change",
+       y     = "-Log10(p‑value)") +
+  scale_color_manual(values = c("No" = "grey", "Yes" = "red")) +
+  geom_text_repel(aes(label = label), na.rm = TRUE, box.padding = 0.3, point.padding = 0.2, segment.size = 0.2)
+
+print(volcano_plot)
+```
+
+## Adjusted p-value
+
+```{r volcano-activity-adj}
+da_activity$log_padj <- -log10(da_activity$p_val_adj + 1e-10)
+
+#adjusted p‑value
+da_activity$Significant <- ifelse(
+  da_activity$p_val_adj < 0.05 & abs(da_activity$avg_log2FC) > 0.25,
+  "Yes", "No"
+)
+
+#top 10 up‑ and down‑regulated genes by log2FC
+top_up_adj   <- head(rownames(da_activity[order(-da_activity$avg_log2FC), ]), 10)
+top_down_adj <- head(rownames(da_activity[order( da_activity$avg_log2FC), ]), 10)
+top_genes_adj <- c(top_up, top_down)
+
+# 4. Create a label column for those 20 genes
+da_activity$label <- ifelse(
+  rownames(da_activity) %in% top_genes,
+  rownames(da_activity),
+  NA
+)
+
+volcano_plot_adj <- ggplot(da_activity, aes(x = avg_log2FC, y = log_padj)) +
+  geom_point(aes(color = Significant), alpha = 0.8) +
+  theme_minimal() +
+  labs(
+    title = "Volcano Plot: Differential Activity (activated vs resting MG)",
+    x     = "Average Log2 Fold Change",
+    y     = "-Log10(adjusted p‑value)"
+  ) +
+  scale_color_manual(values = c("No" = "grey", "Yes" = "red")) +
+  geom_text_repel(
+    aes(label = label),
+    na.rm        = TRUE,
+    box.padding   = 0.3,
+    point.padding = 0.2,
+    segment.size  = 0.2
+  )
+
+# 6. Display
+print(volcano_plot_adj)
+
+table(top_up_adj)
+
+```
+
+
+# 12 Top/Bottom 10 Genes Using Both Activity and Rna
+```{r dual-differential}
+## Combined Differential Expression (RNA) & Activity (ATAC)
+
+combined <- readRDS("combined.rds")
+
+# 1. Ensure identities and assays are set
+Idents(combined) <- combined$celltype
+
+
+# 2. RNA differential expression (Wilcoxon)
+DefaultAssay(combined) <- "RNA"
+combined <- JoinLayers(combined)
+
+da_rna <- FindMarkers(
+  object   = combined,
+  ident.1  = "activated MG",
+  ident.2  = "resting MG",
+  test.use = "wilcox"
+)
+
+library(tibble)
+library(dplyr)
+
+write.csv(da_rna %>% rownames_to_column("gene"), 
+          file = "da_rna_full.csv", row.names = FALSE)
+
+# 4. Merge RNA & ATAC results by gene
+
+da_rna   <- da_rna   %>% rownames_to_column("gene")
+da_activity <- da_activity %>% rownames_to_column("gene")
+
+da_combined <- inner_join(
+  da_rna, da_activity,
+  by        = "gene",
+  suffix    = c(".rna", ".activity")
+) %>%
+  # 5. Compute a simple combined score: mean absolute log2FC
+  mutate(
+    combined_score = (abs(avg_log2FC.rna) + abs(avg_log2FC.activity)) / 2
+  ) %>%
+  arrange(desc(combined_score))
+
+# 6. Pick top 20 genes by combined_score
+top_combined <- da_combined %>% slice_head(n = 200)
+
+# 7. Save to CSV
+write.csv(
+  top_combined,
+  file      = "da_combined_20_genes.csv",
+  row.names = FALSE
+)
+
+write.csv(da_combined, file = "da_combined_full.csv", row.names = FALSE)
+
+# 8. (Optional) preview
+head(top_combined)
+
+```

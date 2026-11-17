@@ -1,0 +1,329 @@
+---
+title: "Multi-Omics Integration Workflow"
+output: html_document
+---
+
+```{r load-libraries, message=FALSE, warning=FALSE}
+#--------------------------
+# Load Libraries
+#--------------------------
+library(Signac)
+library(Seurat)
+library(patchwork)
+library(GenomicRanges)
+library(future)
+library(ggplot2)
+library(AnnotationHub)
+library(BSgenome.Ggallus.UCSC.galGal6)
+library(dplyr)
+library(plotly)
+library(htmlwidgets)
+library(GenomeInfoDb)
+```
+
+## 1. Annotation Reference and Genome Setup
+
+```{r annotation-genome-setup}
+#Reference for label tranfer
+labelobjectdir <- "C:/Users/jacwe/Downloads/SAMAP/rna_Jack.rds"
+reference_obj <- readRDS(labelobjectdir)
+if (!"celltype" %in% colnames(reference_obj@meta.data)) {
+  reference_obj$celltype <- Idents(reference_obj)  # uses active.ident
+}
+
+# Retrieve annotation from AnnotationHub for Gallus gallus
+ah <- AnnotationHub()
+# Query for Gallus gallus gene annotation from Ensembl
+gg_ensdb_query <- query(ah, c("Gallus gallus", "Ensembl", "113", "GRCg7b"))
+
+#select the first result
+gg_ensdb <- gg_ensdb_query[[1]]
+annotation <- GetGRangesFromEnsDb(ensdb = gg_ensdb)
+
+# Set genome and standardize sequence naming (using UCSC style)
+genome(annotation) <- "galGal6"
+```
+
+## 2. Create RNA Objects for Each Sample
+
+```{r create-rna-objects}
+# Sample SS RNA
+ss_rna_counts <- Read10X_h5("C:/Users/jacwe/Downloads/SAMAP/SS/filtered_feature_bc_matrix.h5")
+ss <- CreateSeuratObject(counts = ss_rna_counts, assay = "RNA")
+ss$sample <- "SS"
+
+# Sample NM RNA
+nm_rna_counts <- Read10X_h5("C:/Users/jacwe/Downloads/SAMAP/NM/filtered_feature_bc_matrix.h5")
+nm <- CreateSeuratObject(counts = nm_rna_counts, assay = "RNA")
+nm$sample <- "NM"
+```
+
+## 3. Create ATAC Objects
+
+```{r create-atac-objects}
+# Sample SS ATAC
+ss_atac_counts <- Read10X_h5("C:/Users/jacwe/Downloads/SAMAP/SS/filtered_peak_bc_matrix.h5")
+ss_atac_assay <- CreateChromatinAssay(
+  counts = ss_atac_counts,
+  sep = c(":", "-"),
+  genome = "galGal6",
+  fragments = "C:/Users/jacwe/Downloads/SAMAP/SS/fragments.tsv.gz",
+  annotation = annotation
+)
+ss_atac <- CreateSeuratObject(counts = ss_atac_assay, assay = "ATAC")
+ss_atac$sample <- "SS"
+
+# Sample NM ATAC
+nm_atac_counts <- Read10X_h5("C:/Users/jacwe/Downloads/SAMAP/NM/filtered_peak_bc_matrix.h5")
+nm_atac_assay <- CreateChromatinAssay(
+  counts = nm_atac_counts,
+  sep = c(":", "-"),
+  genome = "galGal6",
+  fragments = "C:/Users/jacwe/Downloads/SAMAP/NM/fragments.tsv.gz",
+  annotation = annotation
+)
+nm_atac <- CreateSeuratObject(counts = nm_atac_assay, assay = "ATAC")
+nm_atac$sample <- "NM"
+
+atac_list <- list(ss_atac, nm_atac)
+```
+
+## 4. Integrate RNA Samples Together
+
+```{r integrate-rna-data}
+# Process each RNA object individually
+rna_list <- list(ss, nm)
+for (i in seq_along(rna_list)) {
+  rna_list[[i]] <- NormalizeData(rna_list[[i]])
+  rna_list[[i]] <- FindVariableFeatures(rna_list[[i]])
+}
+
+# Merge RNA objects and process the merged object
+rna <- merge(ss, nm, add.cell.ids = c("SS", "NM"))
+DefaultAssay(rna) <- "RNA"
+rna <- NormalizeData(rna)
+rna <- ScaleData(rna)
+rna <- FindVariableFeatures(rna)
+rna <- RunPCA(rna, npcs = 100)
+ElbowPlot(rna, ndims = 50)
+rna <- RunUMAP(rna, dims = 1:15)
+rna <- FindNeighbors(rna, dims = 1:30)
+rna <- FindClusters(rna, resolution = 0.5)
+rna$seurat_clusters <- Idents(rna)
+```
+
+## 5. Transfer Labels from Reference to RNA object
+
+```{r transfer-labels-rna}
+transfer_anchors <- FindTransferAnchors(
+  reference = reference_obj,
+  query = rna,
+  dims = 1:30
+)
+predicted_labels <- TransferData(
+  anchorset = transfer_anchors,
+  refdata = reference_obj$celltype,
+  dims = 1:30
+)
+rna$predicted_celltype <- predicted_labels$predicted.id
+
+#Check prediction confidence scores
+print(head(predicted_labels$prediction.score.max))
+
+#assign cell type and modality labels in RNA
+rna$celltype <- rna$predicted_celltype
+rna$modality <- "RNA"
+```
+
+## 6. Process ATAC Data, Create Common Peak Set, Remove Bad Cluster
+
+```{r process-atac-common-peaks}
+# Process each individual ATAC object with TF-IDF, top features, and SVD (using "rlsi" as reduction name)
+for (i in seq_along(atac_list)) {
+  DefaultAssay(atac_list[[i]]) <- "ATAC"
+  atac_list[[i]] <- RunTFIDF(atac_list[[i]])
+  atac_list[[i]] <- FindTopFeatures(atac_list[[i]], min.cutoff = 'q0')
+  atac_list[[i]] <- RunSVD(atac_list[[i]], reduction.name = "rlsi", n = 30)
+}
+
+# Create a unified (common) peak set from both ATAC samples
+ss_peaks <- StringToGRanges(rownames(ss_atac))
+nm_peaks <- StringToGRanges(rownames(nm_atac))
+combined_peak_set <- reduce(c(ss_peaks, nm_peaks))
+peak_widths <- width(combined_peak_set)
+combined_peak_set <- combined_peak_set[peak_widths < 10000 & peak_widths > 20]
+
+# Standardize sequence level styles for the peak ranges
+seqlevelsStyle(ss_atac_assay@ranges) <- "UCSC"
+seqlevelsStyle(nm_atac_assay@ranges) <- "UCSC"
+
+# Merge ATAC objects (merging without filtering QC first)
+atac <- merge(ss_atac, y = nm_atac, add.cell.ids = c("SS", "NM"))
+
+# Re-quantify reads over the unified peak set
+common_counts <- FeatureMatrix(
+  fragments = Fragments(atac),
+  features = combined_peak_set,
+  cells = colnames(atac)
+)
+atac_merged_assay <- CreateChromatinAssay(
+  counts = common_counts,
+  fragments = Fragments(atac),
+  genome = "galGal6",
+  annotation = annotation
+)
+atac <- CreateSeuratObject(counts = atac_merged_assay, assay = "ATAC")
+atac$sample <- sapply(strsplit(colnames(atac), "_"), `[`, 1)
+
+# Process the merged ATAC object: TF-IDF, top features, and SVD (using reduction name "lsi")
+atac <- RunTFIDF(atac)
+atac <- FindTopFeatures(atac, min.cutoff = 'q0')
+atac <- RunSVD(atac, reduction.name = "lsi", n = 30)
+DepthCor(atac)
+
+# Run UMAP on the merged ATAC object using the LSI reduction
+atac <- RunUMAP(atac, reduction = "lsi", dims = 1:30, reduction.key = "atacUMAP_")
+atac <- FindNeighbors(atac, reduction = "lsi", dims = 1:30)
+atac <- FindClusters(atac, resolution = 0.1)
+
+# Subset out cluster "0", bad quality cells
+atac <- subset(atac, idents = setdiff(unique(Idents(atac)), "0"))
+
+#re-run dimensional reduction on filtered data
+atac <- RunTFIDF(atac)
+atac <- FindTopFeatures(atac, min.cutoff = 'q0')
+atac <- RunSVD(atac, reduction.name = "lsi", n = 30)
+atac <- RunUMAP(atac, reduction = "lsi", dims = 1:30)
+atac <- FindNeighbors(atac, reduction = "lsi", dims = 1:30)
+atac <- FindClusters(atac, resolution = 0.1)
+```
+
+## 7. Apply QC on Merged ATAC and Generate UMAP Heatmaps
+
+```{r qc-and-umap-heatmaps}
+DefaultAssay(atac) <- "ATAC"
+
+# Compute nucleosome signal and TSS enrichment on the merged object
+atac <- NucleosomeSignal(atac)
+atac <- TSSEnrichment(atac)
+
+atac <- subset(
+  atac,
+  subset = nCount_ATAC > 500 &
+    TSS.enrichment > 3 &
+    nucleosome_signal < 2
+)
+
+message("Merged ATAC object after QC has ", ncol(atac), " cells")
+
+# After subsetting, re-run TF-IDF, SVD, and UMAP if needed.
+if (!"lsi" %in% names(atac@reductions)) {
+  atac <- RunTFIDF(atac)
+  atac <- FindTopFeatures(atac, min.cutoff = 'q0')
+  atac <- RunSVD(atac, reduction.name = "lsi", n = 30)
+}
+if (!"umap" %in% names(atac@reductions)) {
+  atac <- RunUMAP(atac, reduction = "lsi", dims = 1:30, reduction.key = "atacUMAP_")
+}
+
+# Generate UMAP heatmap for nucleosome_signal using FeaturePlot
+p_nucleosome_umap <- FeaturePlot(
+  atac,
+  features = "nucleosome_signal",
+  reduction = "umap"
+) + ggtitle("UMAP Heatmap: Nucleosome Signal (Merged ATAC, Post-QC)")
+
+# Generate UMAP heatmap for nCount_ATAC using FeaturePlot
+p_nCount_umap <- FeaturePlot(
+  atac,
+  features = "nCount_ATAC",
+  reduction = "umap"
+) + ggtitle("UMAP Heatmap: nCount_ATAC (Merged ATAC, Post-QC)")
+
+# Convert the ggplot heatmaps to interactive Plotly objects
+plotly_nucleosome_umap <- ggplotly(p_nucleosome_umap)
+plotly_nCount_umap <- ggplotly(p_nCount_umap)
+
+plotly_nucleosome_umap
+plotly_nCount_umap
+
+# Save the interactive plots as HTML widgets
+htmlwidgets::saveWidget(plotly_nucleosome_umap, "UMAP_Nucleosome_Signal_Merged_ATAC_PostQC.html")
+htmlwidgets::saveWidget(plotly_nCount_umap, "UMAP_nCountATAC_Merged_ATAC_PostQC.html")
+```
+
+## 8. Transfer RNA Labels to ATAC via Gene Activity
+
+```{r transfer-rna-to-atac}
+# Compute gene activities for ATAC using RNA variable features
+gene.activities <- GeneActivity(atac, features = VariableFeatures(reference_obj))
+atac[["ACTIVITY"]] <- CreateAssayObject(counts = gene.activities)
+
+# Normalize and scale the ACTIVITY assay
+DefaultAssay(atac) <- "ACTIVITY"
+atac <- NormalizeData(atac)
+atac <- ScaleData(atac, features = rownames(atac))
+
+atac <- FindVariableFeatures(atac)
+atac <- RunPCA(atac, assay = "ACTIVITY", reduction.name = "activity_pca")
+
+# Find transfer anchors between RNA (RNA assay) and ATAC (ACTIVITY assay)
+transfer.anchors <- FindTransferAnchors(
+  reference = rna,
+  query = atac,
+  features = VariableFeatures(object = rna),
+  reference.assay = "RNA",
+  query.assay = "ACTIVITY",
+  reduction = "cca"
+)
+
+# Use the gene activity PCA reduction for weighting in TransferData
+celltype.predictions <- TransferData(
+  anchorset = transfer.anchors,
+  refdata = rna$predicted_celltype,  # using RNA predicted cell types
+  weight.reduction = atac[["lsi"]],
+  dims = 2:30
+)
+atac <- AddMetaData(atac, metadata = celltype.predictions)
+
+print(head(celltype.predictions$prediction.score.max))
+
+atac$celltype <- atac$predicted.id
+atac$modality <- "ATAC"
+```
+
+## 9. Save RNA and ATAC Objects Before Integration
+
+```{r save-objects}
+saveRDS(rna, file = "rna_prePlot.rds")
+saveRDS(atac, file = "atac_prePlot.rds")
+```
+
+## 10. Plotting RNA and ATAC UMAPs
+
+```{r plotting-umaps}
+# Plot 1: RNA UMAP colored by cell type
+p_rna_celltype <- DimPlot(rna, reduction = "umap", group.by = "predicted_celltype", label = TRUE) +
+  ggtitle("RNA UMAP: Labeled by Cell Type")
+plotly_rna_celltype <- ggplotly(p_rna_celltype)
+htmlwidgets::saveWidget(plotly_rna_celltype, "RNA_CellType.html")
+
+plotly_rna_celltype
+
+# Plot 2: ATAC UMAP colored by cell type (using predicted.id)
+p_atac_celltype <- DimPlot(atac, reduction = "umap", group.by = "predicted.id", label = TRUE) +
+  ggtitle("ATAC UMAP: Labeled by Cell Type")
+plotly_atac_celltype <- ggplotly(p_atac_celltype)
+htmlwidgets::saveWidget(plotly_atac_celltype, "ATAC_CellType.html")
+
+plotly_atac_celltype
+
+# Plot 3: ATAC UMAP colored by sample
+p_atac_sample <- DimPlot(atac, reduction = "umap", group.by = "sample", label = TRUE) +
+  ggtitle("ATAC UMAP: Labeled by Sample")
+plotly_atac_sample <- ggplotly(p_atac_sample)
+htmlwidgets::saveWidget(plotly_atac_sample, "ATAC_Sample.html")
+
+plotly_atac_sample
+```
+

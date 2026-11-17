@@ -1,0 +1,115 @@
+What I did:
+
+Created necessary files for atac and rna for scenicplus,
+created the consensus_peaks.bed for cisTarget
+created cisTarget using a motif set filtered for those found in Gallus Gallus and then found in the RNA data:
+
+# 1) motif IDs from the chicken snapshot (skip header line)
+cut -f1 v10nr_clust_public/snapshots/motifs-v10-nr.chicken-m0.00001-o0.0.tbl \
+  | tail -n +2 \
+  > motifs_chicken_ids.lst
+(scenicplus) jacwe@MSI:~/gallus_scplus/scenicplus_input$ # 2) all motif IDs that have a .cb file
+ls v10nr_clust_public/singletons/*.cb \
+  | sed 's|.*/||; s/\.cb$//' \
+  > all_cb_ids.lst
+
+# 3) keep only chicken/vertebrate motifs that exist as .cb files
+grep -F -x -f all_cb_ids.lst motifs_chicken_ids.lst \
+  > motifs_chicken_for_db.lst
+  
+then filter_motifs_by_expression.py 
+
+ran create cisTarget db using the above:
+
+python create_cisTarget_databases/create_cistarget_motif_databases.py \
+  -f consensus_regions.fa \
+  -M v10nr_clust_public/singletons \
+  -m motifs_chicken_expr_for_db.lst \
+  -o gallus_consensus_chicken_expr \
+  --bgpadding 0 \
+  -t 4
+  
+ 
+---------------------------------------------------------------
+ R Export (convert_combined_to_scenic.R)
+Takes the combined Seurat object and exports:
+
+rna_matrix.mtx, rna_features.tsv, rna_barcodes.tsv, rna_cell_metadata.csv
+atac_matrix.mtx, atac_barcodes.tsv, peaks.bed, atac_cell_metadata.csv
+fragments_paths.json, umap_combined.csv
+
+Known issue introduced here: peaks.bed gets chr prefix forced onto chromosomes, while the Ensembl genome FASTA uses bare numbers. This mismatch propagates through the entire pipeline and required multiple downstream patches.
+
+2. Genome Annotation (make_genome_annots.py)
+
+Queries Ensembl BioMart for ggallus_gene_ensembl to produce genome_annotation.tsv (Chromosome, Start, End, Strand, Gene, ensembl_gene_id, TSS, Transcript_type)
+Extracts chromosome sizes from Gallus_gallus.GRCg6a.dna.toplevel.fa to produce chromsizes.tsv
+Chromosome names are bare numbers (consistent with Ensembl format) — correctly no chr prefix here
+
+
+3. cisTopic ATAC Processing
+Using pycisTopic on the exported ATAC matrix + peaks.bed:
+
+Built a cisTopic object, ran LDA topic modeling
+Selected the best model
+Saved as atac_cistopic_selected_model_chrstr.pkl
+Region names in the object have format :1:33501-34428 (colon-prefixed bare numbers — the chr from peaks.bed was stripped somewhere during cisTopic processing)
+Ran binarize_topics (Otsu method) → region_sets_topics_otsu.pkl (12 topics)
+
+
+4. RNA Processing
+Using scanpy on the exported RNA matrix:
+
+Normalized, log-transformed, selected 3,000 HVGs
+Computed UMAP, assigned cell types (15 cell types)
+Saved as rna_scanpy_preprocessed.h5ad
+Gene IDs are gene symbols (not Ensembl IDs) — confirmed 2,959/3,000 overlap with genome annotation
+
+
+5. Consensus Peaks + cisTarget DB Build
+On OSC (separate HPC job via run_cistarget_db_osc.sh):
+First, built consensus_regions.fa:
+
+Started from cisTopic region names (:1:33501-... format)
+Converted to BED, ran bedtools getfasta against GRCg6a.dna.toplevel.fa (unmasked)
+Headers ended up as >::1:33501-34428 (bare numbers, colon-prefixed)
+117,521 sequences — more regions than cisTopic's 50,187 (the consensus was broader, likely from all samples merged before cisTopic filtering)
+
+Then filtered motifs:
+bash# Step 1: get motif IDs from chicken snapshot
+cut -f1 motifs-v10-nr.chicken-m0.00001-o0.0.tbl | tail -n +2 > motifs_chicken_ids.lst
+
+# Step 2: get all motif IDs with .cb files
+ls v10nr_clust_public/singletons/*.cb | sed 's|.*/||; s/\.cb$//' > all_cb_ids.lst
+
+# Step 3: intersect
+grep -F -x -f all_cb_ids.lst motifs_chicken_ids.lst > motifs_chicken_for_db.lst
+
+# Step 4: filter by expression (filter_motifs_by_expression.py)
+→ motifs_chicken_expr_for_db.lst (1,639 motifs)
+Then built the DB:
+bashpython create_cistarget_motif_databases.py \
+  -f consensus_regions.fa \
+  -M v10nr_clust_public/singletons \
+  -m motifs_chicken_expr_for_db.lst \
+  -o gallus_consensus_chicken_expr \
+  --bgpadding 0 -t 4
+Output: gallus_consensus_chicken_expr.regions_vs_motifs.scores.feather and .rankings.feather
+Known issue introduced here: DB built on unmasked genome — repetitive/telomeric sequences inflate motif scores uniformly, reducing enrichment signal.
+
+
+6. Genome Annotation for the Snakemake Pipeline
+The notebooks read genome_annotation.tsv from the Snakemake folder (scplus_pipeline/Snakemake/),
+not the copy make_genome_annots.py writes to scenicplus_input/. The Snakemake copy was made with the
+SCENIC+ CLI (originally run from Scenic.ipynb):
+
+cd /mnt/c/Users/jacwe/Downloads/SAMAP/scplus_pipeline/Snakemake
+
+# chromsizes goes to a throwaway path; chromsizes.tsv from make_genome_annots.py is used instead
+scenicplus prepare_data download_genome_annotations \
+  --species ggallus \
+  --biomart_host www.ensembl.org \
+  --genome_annotation_out_fname genome_annotation.tsv \
+  --chromsizes_out_fname /tmp/chromsizes_ignore.tsv
+
+Check config/config.yaml to confirm which genome_annotation.tsv the final run pointed to.

@@ -1,0 +1,506 @@
+---
+title: "Co-Accessible_Motif"
+author: "Jack Webb"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+## This markdown shows Co-Accessable Sites using Cicero and Motif Analysis
+
+```{r setup, include=FALSE}
+# Knit options and global settings
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  print = FALSE
+)
+``` 
+
+## Load required libraries
+
+```{r libraries}
+library(ggplot2)
+library(plotly)
+library(htmlwidgets)
+library(pheatmap)
+library(ggrepel)
+library(Signac)
+library(Seurat)
+library(patchwork)
+library(GenomicRanges)
+library(future)
+library(AnnotationHub)
+library(BSgenome.Ggallus.UCSC.galGal6)
+library(dplyr)
+library(GenomeInfoDb)
+library(JASPAR2020)
+library(TFBSTools)
+#library(SeuratWrappers)
+library(monocle3)
+library(cicero)
+library(BiocParallel)
+register(SerialParam())
+``` 
+
+## Load preprocessed objects (re-run after adding cicero links)
+
+```{r load-data}
+# Load RNA Seurat object
+rna <- readRDS("rna_prePlot.rds")
+DefaultAssay(rna) <- "RNA"
+rna <- JoinLayers(rna)
+
+# Load ATAC object with Cicero links
+atac <- readRDS("atac_with_cicero_links.rds")
+DefaultAssay(atac) <- "ATAC"
+``` 
+
+
+## Commented Out For Runtime (~3hrs), Adds Cicero Links to Whole Atac object
+```{r}
+#atac <- readRDS("atac_prePlot.rds")
+#DefaultAssay(atac) <- "ATAC"
+
+# 2. Convert Seurat object to Monocle3 CellDataSet for Cicero
+#atac.cds <- SeuratWrappers::as.cell_data_set(atac)
+
+#atac.cds <- cluster_cells(atac.cds, 
+#                          reduction_method = "UMAP",
+#                          # you can tweak resolution to get more/fewer clusters:
+#                          cluster_resolution = 1e-2)
+
+#reduced_coords <- reducedDims(atac.cds)$UMAP
+
+# 4. Create Cicero CDS
+#atac.cicero <- make_cicero_cds(atac.cds, reduced_coordinates = reduced_coords)
+
+# 5. Prepare genomic coordinates (chromosome sizes)
+#    Retrieve chromosome lengths from the Seurat object
+#genome_sizes <- seqlengths(atac)
+
+#if not want run whole genome
+#genome <- genome[1]
+
+#    Convert to data.frame
+#genome_df <- data.frame(
+#  chr    = names(genome_sizes),
+#  length = as.numeric(genome_sizes)
+#)
+
+# 6. Run Cicero to compute co-accessibility scores
+#    Adjust sample_num and window parameters as needed
+#conns <- run_cicero(
+#  atac.cicero,
+#  genomic_coords = genome_df,
+#  sample_num      = 100
+#)
+
+#head(conns)
+
+# 7. Generate cis-co-accessible networks (CCANs)
+#ccans <- generate_ccans(conns)
+
+#head(ccans)
+
+# 8. Convert Cicero connections to Signac links
+#links <- ConnectionsToLinks(conns = conns, ccans = ccans)
+
+# 9. Add links to the ChromatinAssay in Seurat
+#Links(atac) <- links
+```
+
+## Helper function: getGeneGRanges from Web
+
+```{r getGeneGRanges}
+#’ Fetch a GRanges for a given chicken gene symbol (galGal6) via biomaRt
+#’
+#’ This uses Ensembl’s “ggallus_gene_ensembl” dataset to look up
+#’ the chrom, start, end, strand for your gene, collapses across
+#’ any transcripts, then optionally extends by upstream/downstream.
+#’
+#’ @param goi         Gene symbol (character), e.g. "EDA2R"
+#’ @param upstream    Bases upstream to include (numeric, default 0)
+#’ @param downstream  Bases downstream to include (numeric, default 0)
+#’ @return A single GRanges object spanning the gene body ± flanks
+#’ @importFrom GenomicRanges GRanges IRanges
+#’ @importFrom biomaRt useEnsembl getBM
+#’ @examples
+#’ gr <- getGeneGRanges("EDA2R", upstream=1000, downstream=1000)
+#’ CoveragePlot(..., region=gr, ...)
+getGeneGRanges <- function(goi, upstream=0, downstream=0) {
+  if (!requireNamespace("biomaRt", quietly=TRUE)) {
+    stop("Please install the biomaRt package: BiocManager::install('biomaRt')")
+  }
+  library(biomaRt)
+  library(GenomicRanges)
+  
+  # connect to Ensembl Genes for chicken
+  ensembl <- useEnsembl(
+    biomart="genes", 
+    dataset="ggallus_gene_ensembl"
+  )  
+  
+  # fetch chrom, start, end, strand for all transcripts of goi
+  attrs <- c("chromosome_name","start_position","end_position","strand")
+  res <- getBM(
+    attributes = attrs,
+    filters    = "external_gene_name",
+    values     = goi,
+    mart       = ensembl
+  )
+  if (nrow(res)==0) {
+    stop(sprintf("Gene ‘%s’ not found in Ensembl ggallus_gene_ensembl", goi))
+  }
+  
+  # collapse across transcripts to full gene span
+  seqs <- unique(res$chromosome_name)
+  if (length(seqs)!=1) {
+    stop("Gene spans multiple chromosomes; please check annotation.")
+  }
+  gr <- GRanges(
+    seqnames = seqs,
+    ranges   = IRanges(
+      start = min(res$start_position),
+      end   = max(res$end_position)
+    ),
+    strand   = if (all(res$strand==1)) "+" else if (all(res$strand==2)) "-" else "*"
+  )
+  
+  # extend by flanking bases
+  if (upstream>0 || downstream>0) {
+    start(gr) <- pmax(1, start(gr) - upstream)
+    end(gr)   <- end(gr)   + downstream
+  }
+  return(gr)
+}
+``` 
+
+## Parameters for gene sets and flanking, modifided top and bottom genes, MSX1 added for reference  
+
+```{r parameters}
+#gene lists from combined_differential, Added MSX1.
+top_genes    <- c("FABP9","ARC","ENSGALG00010020695","TUBB6","TGFB2","S100A6",
+                  "TMEM158","KLF2","HSPB1","ARPC1B","ADCYAP1","MSX1")
+bottom_genes <- c("GLUL","PADI3","UTS2B","GFAP","CPXM2",
+                  "APCDD1","WIF1","G6PC2","CA2","ENSGALG00010007547")
+
+# define how many bases to flank each gene
+flank.up   <- 1000
+flank.down <- 1000
+
+# initialize lists to store plots
+top_cov_plot       <- list()
+top_expr_plot    <- list()
+
+bottom_cov_plot    <- list()
+bottom_expr_plot <- list()
+``` 
+
+## Generate plots for top genes
+
+```{r top-gene-plots}
+for (goi in top_genes) {
+  cat("Generating plots for:", goi, "\n")
+  region_gr <- if (goi == "ENSGALG00010020695") {
+    GRanges(
+  "33",
+  IRanges(start = 11847635, end = 11851020)
+)
+  } else {
+    NULL
+  }
+
+  try({
+    if (is.null(region_gr)) {
+      region_gr <- getGeneGRanges(goi, upstream=flank.up, downstream=flank.down)
+    }
+    expr_plot <- ExpressionPlot(object=rna, features=goi, assay="RNA", group.by="predicted_celltype")
+    cov_plot  <- CoveragePlot(object=atac, region=region_gr, annotation=TRUE, peaks=TRUE,
+                              links=TRUE, assay="ATAC", group.by="celltype",
+                              extend.upstream=flank.up, extend.downstream=flank.down)
+    top_expr_plot[[goi]] <- expr_plot
+    top_cov_plot[[goi]]  <- cov_plot
+  }, silent=FALSE)
+}
+
+``` 
+
+## Generate plots for bottom genes
+
+```{r bottom-gene-plots}
+## Generate plots for top genes
+for (goi in bottom_genes) {
+  cat("Generating plots for:", goi, "\n")
+  region_gr <- if (goi == "ENSGALG00010007547") {
+    GRanges(
+  "33",
+  IRanges(start = 31883047, end = 31925027)
+)
+  } else {
+    NULL
+  }
+
+  try({
+    if (is.null(region_gr)) {
+      region_gr <- getGeneGRanges(goi, upstream=flank.up, downstream=flank.down)
+    }
+    expr_plot <- ExpressionPlot(object=rna, features=goi, assay="RNA", group.by="predicted_celltype")
+    cov_plot  <- CoveragePlot(object=atac, region=region_gr, annotation=TRUE, peaks=TRUE,
+                              links=TRUE, assay="ATAC", group.by="celltype",
+                              extend.upstream=flank.up, extend.downstream=flank.down)
+    bottom_expr_plot[[goi]] <- expr_plot
+    bottom_cov_plot[[goi]]  <- cov_plot
+  }, silent=FALSE)
+}
+
+
+``` 
+
+## Display all plots
+
+```{r display-plots}
+
+# Helper to place coverage on the left and expression on the right
+# using wrap_plots with explicit widths, converting tracks to ggplots
+library(ggplotify)
+side_by_side <- function(cov, expr, widths = c(3, 1)) {
+  # convert coverage Track to ggplot object
+  cov_gg <- as.ggplot(cov)
+  # ensure expr is ggplot
+  expr_gg <- expr
+  wrap_plots(cov_gg, expr_gg, ncol = 2, widths = widths)
+}
+
+# Display top genes side-by-side
+for (goi in top_genes) {
+  expr_plot <- top_expr_plot[[goi]]
+  cov_plot  <- top_cov_plot [[goi]]
+  cat("Rendering gene (side-by-side):", goi, "\n")
+  p <- side_by_side(cov_plot, expr_plot, widths = c(3, 1))
+  print(p)
+}
+
+# Display bottom genes side-by-side
+for (goi in bottom_genes) {
+  expr_plot <- bottom_expr_plot[[goi]]
+  cov_plot  <- bottom_cov_plot [[goi]]
+  cat("Rendering gene (side-by-side):", goi, "\n")
+  p <- side_by_side(cov_plot, expr_plot, widths = c(3, 1))
+  print(p)
+}
+```
+
+
+
+# Adds Motifs, Lots of Conversions Needed Since Peks dont match latest JASPAR
+```{r motif-analysis, print=FALSE, warning=FALSE}
+library(Seurat)            # v5+
+library(Signac)            # >=1.9.0
+library(JASPAR2020)
+library(TFBSTools)
+library(BSgenome.Ggallus.UCSC.galGal6)
+library(GenomeInfoDb)
+library(GenomicRanges)
+
+# ——— 1. Load your ATAC object ———
+atac <- readRDS("atac_prePlot.rds")
+DefaultAssay(atac) <- "ATAC"
+atac <- RegionStats(object = atac, genome = BSgenome.Ggallus.UCSC.galGal6)
+
+# ——— 2. Rebuild & clean up peak GRanges ———
+peak_names  <- rownames(atac@assays$ATAC@counts)
+peak_ranges <- StringToGRanges(peak_names, sep = c(":", "-"))
+names(peak_ranges) <- peak_names
+
+genome_si   <- seqinfo(BSgenome.Ggallus.UCSC.galGal6)
+seqlevelsStyle(peak_ranges) <- seqlevelsStyle(genome_si)
+keep_lvls   <- intersect(seqlevels(peak_ranges), standardChromosomes(genome_si))
+peak_ranges <- keepSeqlevels(peak_ranges, keep_lvls, pruning.mode = "coarse")
+seqinfo(peak_ranges) <- genome_si[keep_lvls]
+peak_ranges <- trim(peak_ranges)
+
+# ——— 3. Subset your counts to match those trimmed ranges ———
+counts_trimmed <- atac@assays$ATAC@counts[ names(peak_ranges), , drop = FALSE ]
+stopifnot(
+  nrow(counts_trimmed) == length(peak_ranges),
+  all(rownames(counts_trimmed) == names(peak_ranges))
+)
+
+# Grab any existing fragments path
+frag_path <- atac@assays$ATAC@fragments %||% NULL
+
+# ——— 4. Create a brand‐new peaks ChromatinAssay ———
+atac[["peaks"]] <- CreateChromatinAssay(
+  counts    = counts_trimmed,
+  ranges    = peak_ranges,
+  genome    = "galGal6",
+  sep       = c(":", "-"),
+  fragments = frag_path
+)
+
+DefaultAssay(atac) <- "peaks"
+
+atac <- RegionStats(
+  object = atac,
+  assay  = "peaks",
+  genome = BSgenome.Ggallus.UCSC.galGal6
+)
+
+message(
+  "New ‘peaks’ assay: ",
+  nrow(atac@assays$peaks@counts), " peaks × ",
+  ncol(atac@assays$peaks@counts), " cells\n"
+)
+
+# ——— 5. Load JASPAR2020 PFMs ———
+opts <- list(species = 9606, all_versions = FALSE)
+pfm <- getMatrixSet(JASPAR2020, opts)
+message("Loaded ", length(pfm), " PWMs from JASPAR2020.\n")
+
+# ——— 6. Add motifs & run chromVAR ———
+# Signac will matchMotifs(), subset/alignto your ‘peaks’ assay, and attach them
+atac <- AddMotifs(
+  object = atac,
+  genome = BSgenome.Ggallus.UCSC.galGal6,
+  pfm    = pfm
+)
+
+matched_peaks <- rownames(atac@assays$peaks@motifs@data)
+message("Keeping ", length(matched_peaks), " peaks that have motif data.")
+
+# 2) Pull out the trimmed counts & ranges you originally built
+orig_counts   <- atac@assays$peaks@counts
+orig_ranges   <- atac@assays$peaks@ranges
+frag_path     <- atac@assays$peaks@fragments %||% NULL
+
+
+# Force names to match counts matrix
+names(orig_ranges) <- rownames(orig_counts)
+
+# Now subset in lockstep
+counts_matched <- orig_counts[matched_peaks, , drop = FALSE]
+ranges_matched <- orig_ranges[matched_peaks]
+
+# Confirm match
+stopifnot(
+  nrow(counts_matched) == length(ranges_matched),
+  all(rownames(counts_matched) == names(ranges_matched))
+)
+
+# 3) Subset both in lockstep
+counts_matched <- orig_counts[matched_peaks, , drop = FALSE]
+ranges_matched <- orig_ranges[matched_peaks]
+stopifnot(
+  nrow(counts_matched) == length(ranges_matched),
+  all(rownames(counts_matched) == names(ranges_matched))
+)
+
+# 4) Create a brand‐new ChromatinAssay
+new_peaks_assay <- CreateChromatinAssay(
+  counts    = counts_matched,
+  ranges    = ranges_matched,
+  genome    = "galGal6",
+  sep       = c(":", "-"),
+  fragments = frag_path
+)
+
+atac[["peaks"]] <- new_peaks_assay
+DefaultAssay(atac) <- "peaks"
+atac <- AddMotifs(
+  object = atac,
+  genome = BSgenome.Ggallus.UCSC.galGal6,
+  pfm    = pfm
+)
+
+message("Rebuilt 'peaks' assay with matched counts & ranges.")
+
+# 6) Re‐attach your motifs slot (Signac will re‐use the existing motif object)
+motif_obj <- atac@assays$peaks@motifs
+atac@assays$peaks@motifs <- motif_obj
+
+# 7) Now RunChromVAR() on this clean assay
+DefaultAssay(atac) <- "peaks"
+atac <- RunChromVAR(
+  object = atac,
+  genome = BSgenome.Ggallus.UCSC.galGal6
+)
+message("chromVAR completed on ", nrow(atac@assays$peaks@counts), " peaks.")
+
+```
+#Plots and Save top motifs 
+```{r}
+## ——— Bottom section: motif‐enrichment with proper GC‐matching ———
+
+# 1) Make sure we're using the peaks assay
+DefaultAssay(atac) <- "peaks"
+
+# 2) Read in your DA peaks and convert to peak names in the object
+da_peaks <- read.csv("da_peaks.csv", row.names = 1)
+filtered_da_peaks <- da_peaks[da_peaks$p_val_adj < 0.05 & da_peaks$avg_log2FC > 0.5, ]
+
+peak_names <- rownames(filtered_da_peaks)
+converted_peak_names <- paste0("chr", peak_names)            # assume your rownames are e.g. "1-2345-2450"
+converted_peak_names <- intersect(converted_peak_names, rownames(atac))
+
+# 3) Drop any old GC.percent or sequence.length columns
+mf <- atac@assays$peaks@meta.features
+mf <- mf[, !colnames(mf) %in% c("GC.percent", "sequence.length")]
+atac@assays$peaks@meta.features <- mf
+
+# 4) Recompute GC‐ and size‐bias metrics
+atac <- RegionStats(
+  object = atac,
+  assay  = "peaks",
+  genome = BSgenome.Ggallus.UCSC.galGal6
+)
+
+# 5) Rename to the Signac‐expected slot names so that FindMotifs() can draw a GC‐matched
+mf <- atac@assays$peaks@meta.features
+mf$gc           <- mf$GC.percent
+mf$bias         <- mf$sequence.length
+mf$region.width <- mf$sequence.length
+atac@assays$peaks@meta.features <- mf
+
+# 6) (Re‐)add motifs (will reuse the existing motif object if present)
+atac <- AddMotifs(
+  object = atac,
+  genome = BSgenome.Ggallus.UCSC.galGal6,
+  pfm    = pfm
+)
+
+# 7) Run motif enrichment with automatic GC‐matched background
+enriched <- FindMotifs(
+  object   = atac,
+  features = converted_peak_names
+)
+
+# 8) Sort by p‐value (ascending) and write out
+enriched_sorted <- enriched[order(enriched$pvalue), ]
+head(enriched_sorted)
+
+write.csv(
+  enriched_sorted,
+  "enriched_motifs_sorted.csv",
+  row.names = FALSE
+)
+
+#save updated Seurat object
+saveRDS(atac, "atac_with_motifs_and_stats.rds")
+
+#example plot
+p2 <- FeaturePlot(
+  object = atac,
+  features = "MA1513.1",
+  min.cutoff = 'q10',
+  max.cutoff = 'q90',
+  pt.size = 0.1
+)
+
+p2
+
+```
+
+
+## Future Analysis
+
+#### Future Analysis will likely combine more multimodal data to observe the differences between Activated/Resting Muller Glia or other identified types or clusters with the treatments of saline and NMDA. This could be done by stitching more rna/atac samples into the original objects (like has been done in RNA_ATAC_Setup), or via true multiomic analysis in the same cells. Different Cell type Clustering/Labeling Or Dimensions methods can also be tried.
