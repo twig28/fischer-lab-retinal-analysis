@@ -1,0 +1,42 @@
+# ── Large data and intermediate objects ─────────────────────────
+# Seurat / AnnData / MuData objects
+*.rds
+*.RData
+*.h5ad
+*.h5mu
+*.h5
+*.hdf5
+*.loom
+*.pkl
+
+# Matrices, genomes, fragments and cisTarget databases
+*.mtx
+*.fa
+*.fa.fai
+*.fasta
+*.feather
+*.feather.bak
+*.cb
+*.tsv.gz
+*.tsv.gz.tbi
+*.bed.gz
+
+# SCENIC+ inputs and Snakemake working files
+scenicplus_input/
+scplus_pipeline/
+.snakemake/
+tmp/
+
+# ── R / Jupyter ─────────────────────────────────────────────────
+.Rhistory
+.Rproj.user/
+*_cache/
+*_files/
+.ipynb_checkpoints/
+__pycache__/
+
+# ── OS junk ─────────────────────────────────────────────────────
+.DS_Store
+._*
+Thumbs.db
+desktop.ini

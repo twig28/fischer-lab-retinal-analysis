@@ -1,6 +1,6 @@
 # Chicken Retina Multiome: Seurat + SCENIC+
 
-Single-cell RNA + ATAC analysis of chicken (*Gallus gallus*, galGal6 / GRCg6a) retina from two samples (SS, NM). The main question is what separates **activated** from **resting Müller glia (MG)**, first through differential expression, accessibility and motif enrichment in Seurat/Signac, then through gene regulatory networks (eRegulons) inferred with SCENIC+.
+Single-cell RNA + ATAC analysis of chicken (*Gallus gallus*) retina from two samples (SS, NM). The main question is what separates **activated** from **resting Müller glia (MG)**, first through differential expression, accessibility and motif enrichment in Seurat/Signac, then through gene regulatory networks (eRegulons) inferred with SCENIC+.
 
 The project runs in three stages, plus a separate side analysis:
 
@@ -19,10 +19,11 @@ The project runs in three stages, plus a separate side analysis:
 ├── 01_seurat/
 │   ├── 01_RNA_ATAC_Setup.Rmd
 │   ├── 02_combined_differential.Rmd
-│   ├── 03_cicero_coaccessibility.R             # atac_analysis.R
+│   ├── 03_cicero_coaccessibility.R
 │   ├── 04_coaccessible_motif.Rmd
-│   ├── 04b_coaccessible_motif_act_vs_rest.Rmd
-│   └── 05_signac_scenic_motif_reconcile.R      # signac_scenic_extra_ports.R
+│   ├── 04b_coaccessible_motif_activated_vs_resting.Rmd
+│   ├── 05_signac_scenic_motif_enrichment.R
+│   └── outputs/                      # knitted reports, interactive UMAPs, DA tables
 ├── 02_scenicplus_prep/
 │   ├── 01_convert_combined_to_scenic.R
 │   ├── 02_make_genome_annots.py
@@ -30,22 +31,26 @@ The project runs in three stages, plus a separate side analysis:
 │       ├── steps.txt
 │       └── run_cistarget_db_osc.sh
 ├── 03_scenicplus/
-│   ├── 01_scenicplus_allcells.ipynb            # Scenicplus.ipynb
-│   └── 02_scenicplus_MG_v2db.ipynb             # Scenicplusnewfeather.ipynb
-├── 04_samap_chicken_mouse/                     # side analysis, separate from the pipeline
-│   ├── 01_Seurat_To_Samap.R
-│   ├── 02_Chicken_Mouse_Samap_Run.ipynb
-│   ├── 02b_Chicken_Mouse_Samap_Run_Sub48Chicken.ipynb
-│   ├── 03_Chicken_Mouse_Downstream.ipynb
-│   ├── 03b_Chicken_Mouse_Downstream_Sub48Chicken.ipynb
-│   └── 04_Samap_To_Seurat.R
-├── data/                                       # not tracked: 10x outputs, genome FASTA, reference objects
-├── objects/                                    # not tracked: .rds objects made by 01_seurat
-├── scenicplus_input/                           # not tracked: exports, cisTopic objects, feather DBs
-└── results/                                    # CSV tables, figures and the Cytoscape network
+│   ├── 01_scenicplus_allcells.ipynb
+│   ├── 02_scenicplus_MG_v2db.ipynb
+│   ├── flow_chart_SCENIC+.png        # generic SCENIC+ workflow figure (SCENIC+ docs)
+│   ├── scenicplus_environment.yml    # conda environment export
+│   ├── scenicplus_pip_freeze.txt     # pip package versions
+│   └── outputs/                      # eRegulon tables, figures, Cytoscape network files
+└── 04_SAMAP/
+    ├── Seurat_To_Samap.R
+    ├── Chicken_Mouse_Samap_Run.ipynb
+    ├── Chicken_Mouse_Samap_Run_Sub48Chicken.ipynb
+    ├── Chicken_Mouse_Downstream.ipynb
+    ├── Chicken_Mouse_Downstream_Sub48Chicken.ipynb
+    ├── Samap_To_Seurat.R
+    ├── requirements.txt              # Python package versions for SAMap
+    ├── top_200_MGPC_DE_genes.csv     # top 200 DE genes for MG-derived progenitors (MGPCs)
+    ├── chicken_and_mouse_mappigs/    # BLAST gene maps (chms/ and msch/)
+    └── outputs/                      # Sankey plots, gene-pair tables, UMAPs, MGPC gene lists
 ```
 
-The numbers give the run order, and the comment shows a file's current name where it is renamed. Code lives in the numbered folders; data and generated objects live in the four folders at the bottom, which are best kept out of git with a `.gitignore` (except `results/` if you want the final tables tracked).
+Scripts in `01_seurat/` and `02_scenicplus_prep/` are numbered in run order. Large objects (`.rds`, `.h5ad`, `.h5mu`, cisTopic pickles, feather databases, raw 10x data) are not in the repo; `.gitignore` keeps them out.
 
 ---
 
@@ -95,13 +100,13 @@ flowchart TD
     da --- j(( )):::junction
     cic --- j
     j --> s4["04_coaccessible_motif.Rmd"]:::script
-    j --> s4b["04b_coaccessible_motif_act_vs_rest.Rmd"]:::script
+    j --> s4b["04b_coaccessible_motif_activated_vs_resting.Rmd"]:::script
 
     s4 --> mot[("enriched_motifs_sorted.csv<br/>atac_with_motifs_and_stats.rds")]:::obj
     s4b --> motb[("enriched_motifs_resting_vs_activated_sorted.csv")]:::obj
 
     tbl[/"SCENIC+ chicken motif table<br/>(motif collection download)"/]:::input
-    mot --> s5["05_signac_scenic_motif_reconcile.R"]:::script
+    mot --> s5["05_signac_scenic_motif_enrichment.R"]:::script
     tbl --> s5
     s5 --> rec[("enriched_motifs_scenic_reconciled.csv<br/>motif_comparison_summary.csv<br/>celltype_mean_expression.csv<br/>→ Stage 3")]:::obj
 
@@ -120,14 +125,14 @@ flowchart TD
 | `02_combined_differential.Rmd` | Imputes RNA into ATAC, merges both into one object with a joint UMAP, and runs activated vs resting MG tests: differential peaks, gene activity and RNA DE. |
 | `03_cicero_coaccessibility.R` | Runs Cicero co-accessibility on the ATAC object (about 3 h) and makes early coverage plots. |
 | `04_coaccessible_motif.Rmd` | Coverage + expression plots for the top and bottom DE genes with Cicero links, then JASPAR motif annotation, chromVAR, and GC-matched motif enrichment in activated-MG peaks. |
-| `04b_coaccessible_motif_act_vs_rest.Rmd` | Variant that tests activated peaks against resting peaks directly, and the reverse. |
-| `05_signac_scenic_motif_reconcile.R` | Reruns the Signac motif enrichment using only TFs that also appear in the SCENIC+ chicken motif table, so the two approaches can be compared. Also exports mean expression per cell type. |
+| `04b_coaccessible_motif_activated_vs_resting.Rmd` | Variant that tests activated peaks against resting peaks directly, and the reverse. |
+| `05_signac_scenic_motif_enrichment.R` | Reruns the Signac motif enrichment using only TFs that also appear in the SCENIC+ chicken motif table, so the two approaches can be compared. Also exports mean expression per cell type. |
 
 ### Objects
 
 | Object | Made by | Used by |
 |---|---|---|
-| `rna_prePlot.rds` | 01 | 02, 04, 04b, 05 |
+| `rna_prePlot.rds` | 01 | 02, 03, 04, 04b, 05 |
 | `atac_prePlot.rds` | 01 | 02, 03, 04, 04b |
 | `combined.rds` | 02 | Stage 2 export |
 | `da_peaks.csv` | 02 | 04, 04b, 05 |
@@ -136,6 +141,17 @@ flowchart TD
 | `atac_with_motifs_and_stats.rds` | 04 | 05 |
 | `enriched_motifs_sorted.csv` | 04 | 05 |
 | `enriched_motifs_scenic_reconciled.csv`, `motif_comparison_summary.csv`, `celltype_mean_expression.csv` | 05 | Stage 3 notebooks |
+
+### `01_seurat/outputs/`
+
+| File | What it is |
+|---|---|
+| `RNA_ATAC_Setup.html` | Knitted report of `01_RNA_ATAC_Setup.Rmd` from an earlier run with the `NEW_clod_NMDA.rds` reference |
+| `combined_differential.html`, `coaccessible_motif.html` | Knitted reports of scripts 02 and 04 |
+| `RNA_CellType.html`, `ATAC_CellType.html`, `ATAC_Sample.html` | Interactive UMAPs from script 01 |
+| `UMAP_Nucleosome_Signal_Merged_ATAC_PostQC.html`, `UMAP_nCountATAC_Merged_ATAC_PostQC.html` | Interactive ATAC QC UMAPs from script 01 |
+| `Integrated_UMAP_*.html` | Interactive joint RNA + ATAC UMAPs from script 02 (by cell type, modality and sample); `Preliminary/` holds earlier versions |
+| `da_peaks.csv`, `da_activity.csv` | Differential accessibility and gene activity, activated vs resting MG |
 
 ---
 
@@ -205,7 +221,7 @@ flowchart TD
     out1 --> nb2(["02_scenicplus_MG_v2db.ipynb<br/>MG-only cisTopic + Snakemake"]):::notebook
     inp --> nb2
     v2 --> nb2
-    nb2 --> final[("results/<br/>Cytoscape network<br/>TF knockout summary<br/>top eRegulons + targets")]:::obj
+    nb2 --> final[("03_scenicplus/outputs/<br/>eRegulon tables, figures,<br/>Cytoscape network files")]:::obj
 
     classDef input fill:#fef3c7,stroke:#b45309,color:#000
     classDef script fill:#dbeafe,stroke:#1d4ed8,color:#000
@@ -219,34 +235,50 @@ Both notebooks run the SCENIC+ Snakemake pipeline from inside the notebook.
 |---|---|
 | `01_scenicplus_allcells.ipynb` | SCENIC+ run on all cell types. Cell 0 does the scanpy RNA preprocessing and cisTopic topic modelling (Stage 2). The remaining cells check and repair the feather database and region names, run the Snakemake pipeline, and compare activated vs resting MG across RNA, ATAC and eRegulon layers. |
 | `02_scenicplus_MG_v2db.ipynb` | **Final analysis.** Reruns cisTopic on MG cells only, builds per-cell-type region sets, and runs SCENIC+ against the rebuilt v2 database. Produces the Cytoscape network, simulated TF knockouts (MYC, RUNX1, THRB, ELF3) and the top eRegulon/target tables. |
+| `scenicplus_environment.yml`, `scenicplus_pip_freeze.txt` | The conda environment and pip package versions used for the SCENIC+ runs. |
+| `flow_chart_SCENIC+.png` | Generic SCENIC+ workflow figure from the SCENIC+ documentation, for reference. |
+
+### `03_scenicplus/outputs/`
+
+| Files | What they are |
+|---|---|
+| `TF_act_vs_rest.csv`, `TF_MG_vs_background.csv`, `TF_table_statistics.csv`, `MG_TF_crosslayer_evidence.csv`, `focal_TF_crosslayer.csv` | TF-level comparisons: activated vs resting MG, MG vs other cell types, and evidence combined across RNA, ATAC and eRegulon layers |
+| `MG_eRegulon_AUC_delta.csv`, `TF_ΔAUC_bars.png`, `RSS_scores.csv`, `RSS_plot.png`, `MG_specificity_check.csv` | eRegulon activity (AUC) differences and cell-type specificity (RSS) |
+| `top_eRegulons_RNA_ATAC.*`, `top_eRegulon_top5_targets.*` | Top eRegulons and their top target genes (table + plot) |
+| `focal_TF_targets_ACT.csv`, `focal_TF_targets_REST.csv`, `MG_enriched_TF_targets.csv`, `MG_vs_bg_TF_targets.csv`, `target_gene_TF_links.csv` | TF → target gene lists |
+| `genes_act_vs_rest.csv`, `gene_table_act_vs_rest.csv`, `transition_genes.csv`, `top_pathway_genes.csv`, `hub_genes.csv` | Gene-level tables for activated vs resting MG |
+| `r2g_activated_MG_DE_genes.csv`, `r2g_resting_MG_DE_genes.csv` | Region-to-gene links for DE genes in each MG state |
+| `volcano_act_vs_rest.png`, `volcano_TF_gene.png`, `volcano_EGF_family.png` | Volcano plots |
+| `KO_predicted_effects.png` | Predicted effects of the simulated TF knockouts |
+| `MG_network.graphml`, `scenic_network_hub.xgmml`, `cytoscape_hub_nodes.csv`, `cytoscape_hub_edges.csv`, `scenic.cys` | Network files; `scenic.cys` is a Cytoscape session |
 
 ---
 
-## Side analysis: chicken–mouse SAMap (`04_samap_chicken_mouse/`)
+## Side analysis: chicken–mouse SAMap (`04_SAMAP/`)
 
-This maps chicken retina cells onto a mouse retina dataset with [SAMap](https://github.com/atarashansky/SAMap), which aligns species using BLAST gene homology instead of shared gene names. It is related to the main project but doesn't feed into, or depend on, the stages above. There are two parallel runs: one with the full chicken dataset and one with a smaller chicken subset (`sub48`). The `b` files are the subset versions of the same steps.
+This maps chicken retina cells onto a mouse retina dataset with [SAMap](https://github.com/atarashansky/SAMap), which aligns species using BLAST gene homology instead of shared gene names. It is related to the main project but doesn't feed into, or depend on, the stages above. There are two parallel runs: one with the full chicken dataset and one with a smaller chicken subset (`Sub48Chicken`).
 
 ```mermaid
 flowchart TD
     chrds[/"Chicken Seurat object (.rds)"/]:::input
     msrds[/"mouse.rds"/]:::input
-    blast[/"BLAST gene maps<br/>chicken_and_mouse/chms/maps/"/]:::input
+    blast[/"BLAST gene maps<br/>chicken_and_mouse_mappigs/chms/maps/"/]:::input
 
-    a1["01_Seurat_To_Samap.R"]:::script
+    a1["Seurat_To_Samap.R"]:::script
     chrds --> a1
     msrds --> a1
     a1 --> h5in[("samap_adata_sparse.h5ad (chicken)<br/>samap_adata_chicken_sub48.h5ad (subset)<br/>samap_adata_sparse_mouse.h5ad (mouse)")]:::obj
 
-    a2(["02_Chicken_Mouse_Samap_Run.ipynb<br/>02b for subset"]):::notebook
+    a2(["Chicken_Mouse_Samap_Run.ipynb<br/>+ _Sub48Chicken version"]):::notebook
     h5in --> a2
     blast --> a2
     a2 --> res[("samap_object_*.pkl<br/>samap_adata_*.pkl<br/>samap_results_h5ad_*.h5ad")]:::obj
 
-    a3(["03_Chicken_Mouse_Downstream.ipynb<br/>03b for subset"]):::notebook
+    a3(["Chicken_Mouse_Downstream.ipynb<br/>+ _Sub48Chicken version"]):::notebook
     res --> a3
-    a3 --> dout[("Sankey + chord plots<br/>treatmentgenepairs.csv<br/>celltypegenepairs.csv")]:::obj
+    a3 --> dout[("04_SAMAP/outputs/<br/>Sankey plots, gene-pair tables")]:::obj
 
-    a4["04_Samap_To_Seurat.R"]:::script
+    a4["Samap_To_Seurat.R"]:::script
     res --> a4
     a4 --> rds[("SAMap results as Seurat .rds")]:::obj
 
@@ -258,20 +290,33 @@ flowchart TD
 
 | File | What it does |
 |---|---|
-| `01_Seurat_To_Samap.R` | Converts a Seurat object to `.h5ad` with sceasy so SAMap can read it, storing the cluster identities in `active_ident`. Set up for the mouse object, and rerun with the chicken object (or subset) to make the chicken input. |
-| `02_Chicken_Mouse_Samap_Run.ipynb` | Loads the chicken and mouse `.h5ad` files and the BLAST homology maps, runs SAMap, shows the joint UMAP, and saves the SAMap object, the combined AnnData and a results `.h5ad`. |
-| `02b_Chicken_Mouse_Samap_Run_Sub48Chicken.ipynb` | Same run using the chicken subset. |
-| `03_Chicken_Mouse_Downstream.ipynb` | Loads the saved SAMap object and compares the species twice: chicken treatment against mouse cell types, then cell type against cell type. Each comparison gives mapping scores, Sankey and chord plots, and the gene pairs driving the alignment. |
-| `03b_Chicken_Mouse_Downstream_Sub48Chicken.ipynb` | Same analysis on the subset run (groups chicken cells by `orig.ident` for the first comparison). |
-| `04_Samap_To_Seurat.R` | Loads the SAMap pickles through reticulate and converts the results `.h5ad` back into a Seurat object for further analysis in R. |
+| `Seurat_To_Samap.R` | Converts a Seurat object to `.h5ad` with sceasy so SAMap can read it, storing the cluster identities in `active_ident`. Set up for the mouse object, and rerun with the chicken object (or subset) to make the chicken input. |
+| `Chicken_Mouse_Samap_Run.ipynb` | Loads the chicken and mouse `.h5ad` files and the BLAST homology maps, runs SAMap, shows the joint UMAP, and saves the SAMap object, the combined AnnData and a results `.h5ad`. |
+| `Chicken_Mouse_Samap_Run_Sub48Chicken.ipynb` | Same run using the chicken subset. |
+| `Chicken_Mouse_Downstream.ipynb` | Loads the saved SAMap object and compares the species twice: chicken treatment against mouse cell types, then cell type against cell type. Each comparison gives mapping scores, Sankey and chord plots, and the gene pairs driving the alignment. |
+| `Chicken_Mouse_Downstream_Sub48Chicken.ipynb` | Same analysis on the subset run. |
+| `Samap_To_Seurat.R` | Loads the SAMap pickles through reticulate and converts the results `.h5ad` back into a Seurat object for further analysis in R. |
+| `chicken_and_mouse_mappigs/` | BLAST gene maps between chicken and mouse (`ch_to_ms.txt`, `ms_to_ch.txt`), made with SAMap's `map_genes.sh`. The notebooks read them from `chicken_and_mouse/chms/maps/`. |
+| `top_200_MGPC_DE_genes.csv` | Top 200 differentially expressed genes for MG-derived progenitor cells (MGPCs) |
+| `requirements.txt` | Python package versions for the SAMap environment |
 
-The BLAST maps come from SAMap's `map_genes.sh` run on the chicken and mouse proteomes; that step isn't included here.
+### `04_SAMAP/outputs/`
+
+| Files | What they are |
+|---|---|
+| `treatmentgenepairs.csv`, `celltypegenepairs.csv`, `CHcelltype_vs_MStreatment_gene_pairs.csv` | Gene pairs driving the chicken–mouse alignment, by treatment and by cell type |
+| `CelltypeVSTreatmentSankey.png` | Sankey plot of chicken cell types against mouse treatments |
+| `Chicken_MGPC_To*_genes.txt`, `Mouse_MGPC_To*_genes.txt` | MGPC gene lists by time point (12–24 h, 48 h+) for each species |
+| `ch_*.png`, `ms_*.png`, `chPCNA.png`, `msPCNA.png`, `msCXCL2.png`, `ch_MG_UMAP.pdf`, `ms_MG_UMAP.pdf` | UMAPs coloured by treatment, identity and selected genes (PCNA, F3, HBEGF, TGFB2, CXCL2) |
+| `Downstream Library 1/` | Plots from the full-chicken downstream run |
+| `Downstream sub48 chicken library/` | Plots and gene-pair tables from the subset run |
+| `Downstream sub48 chicken changing resolution/` | Subset-run UMAPs at a different clustering resolution |
 
 ---
 
 ## Software
 
 R: Seurat v5, Signac, SeuratWrappers, BSgenome.Ggallus.UCSC.galGal6, JASPAR2020, TFBSTools, monocle3, cicero, biomaRt, AnnotationHub.
-Python: scanpy, pycisTopic, pycistarget, scenicplus (Snakemake pipeline), mudata, pyranges.
+Python (SCENIC+): see `03_scenicplus/scenicplus_environment.yml` and `scenicplus_pip_freeze.txt`. Main packages: scanpy, pycisTopic, pycistarget, scenicplus (Snakemake pipeline), mudata, pyranges.
 cisTarget database: `create_cisTarget_databases` with Cluster-Buster and the v10nr_clust motif collection.
-SAMap: samap, sam-algorithm (Python 3.10), sceasy and reticulate for converting between Seurat and AnnData.
+SAMap: see `04_SAMAP/requirements.txt`. Main packages: samap, sam-algorithm (Python 3.10), plus sceasy and reticulate in R for converting between Seurat and AnnData.
